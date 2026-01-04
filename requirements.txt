@@ -52,3 +52,4 @@ motor==3.6.0
 # Additional
 aiofiles==24.1.0
 aiofiles>=23.2.1
+Pillow
