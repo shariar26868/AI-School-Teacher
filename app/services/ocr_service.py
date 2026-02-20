@@ -8,7 +8,10 @@ from app.config import settings
 import asyncio
 import re
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+# Initialize OpenAI client only if API key is available
+client = None
+if settings.OPENAI_API_KEY:
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 def clean_ocr_text(text: str) -> str:
     """
@@ -149,6 +152,9 @@ def _ocr_image_bytes_sync(image_bytes: bytes) -> str:
     """
     Use GPT-4 Vision to extract text from image (SYNCHRONOUS)
     """
+    if not client:
+        raise RuntimeError("OpenAI API key is not configured. Please set OPENAI_API_KEY in your .env file.")
+    
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     
     try:

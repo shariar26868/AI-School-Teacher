@@ -1,9 +1,13 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+from typing import Optional
 
 class Settings(BaseSettings):
-    # OpenAI
-    OPENAI_API_KEY: str
+    # OpenAI (optional - only needed if not using Gemini for everything)
+    OPENAI_API_KEY: Optional[str] = None
+    
+    # Google Gemini (for mindmap and other AI tasks)
+    GEMINI_API_KEY: Optional[str] = None
     
     # AWS
     AWS_ACCESS_KEY_ID: str

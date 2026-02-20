@@ -2,41 +2,82 @@ from openai import OpenAI
 from app.config import settings
 from typing import List, Dict, Optional
 import re
+from datetime import datetime
+from app.services import db_service
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
-# In-memory conversation storage
-conversations: Dict[str, List[Dict]] = {}
+
+async def get_conversation_history(student_id: str, assignment_id: str) -> List[Dict]:
+    """Get conversation history for a student-assignment pair from database"""
+    try:
+        if db_service.database is None:
+            return []
+        
+        chat_collection = db_service.database.get_collection('chat_messages')
+        
+        messages = await chat_collection.find({
+            "student_id": student_id,
+            "assignment_id": assignment_id
+        }).to_list(length=None)
+        
+        # Sort by creation time
+        messages = sorted(messages, key=lambda x: x.get('created_at', datetime.utcnow()))
+        
+        # Keep only last 20 messages
+        if len(messages) > 20:
+            messages = messages[-20:]
+        
+        # Remove MongoDB _id field
+        for msg in messages:
+            msg.pop('_id', None)
+            msg.pop('created_at', None)
+        
+        return messages
+        
+    except Exception as e:
+        print(f"Error retrieving conversation history: {e}")
+        return []
 
 
-def get_conversation_history(student_id: str, assignment_id: str) -> List[Dict]:
-    """Get conversation history for a student-assignment pair"""
-    key = f"{student_id}_{assignment_id}"
-    return conversations.get(key, [])
+async def save_conversation(student_id: str, assignment_id: str, role: str, content: str, interaction_type: str = "ai_response"):
+    """Save a message to conversation history in database"""
+    try:
+        if db_service.database is None:
+            return
+        
+        chat_collection = db_service.database.get_collection('chat_messages')
+        
+        message_doc = {
+            "student_id": student_id,
+            "assignment_id": assignment_id,
+            "role": role,
+            "content": content,
+            "interaction_type": interaction_type,
+            "created_at": datetime.utcnow()
+        }
+        
+        await chat_collection.insert_one(message_doc)
+        
+    except Exception as e:
+        print(f"Error saving conversation: {e}")
 
 
-def save_conversation(student_id: str, assignment_id: str, role: str, content: str):
-    """Save a message to conversation history"""
-    key = f"{student_id}_{assignment_id}"
-    
-    if key not in conversations:
-        conversations[key] = []
-    
-    conversations[key].append({
-        "role": role,
-        "content": content
-    })
-    
-    # Keep only last 20 messages
-    if len(conversations[key]) > 20:
-        conversations[key] = conversations[key][-20:]
-
-
-def clear_conversation(student_id: str, assignment_id: str):
-    """Clear conversation history"""
-    key = f"{student_id}_{assignment_id}"
-    if key in conversations:
-        del conversations[key]
+async def clear_conversation(student_id: str, assignment_id: str):
+    """Clear conversation history from database"""
+    try:
+        if db_service.database is None:
+            return
+        
+        chat_collection = db_service.database.get_collection('chat_messages')
+        
+        await chat_collection.delete_many({
+            "student_id": student_id,
+            "assignment_id": assignment_id
+        })
+        
+    except Exception as e:
+        print(f"Error clearing conversation: {e}")
 
 
 def is_greeting(text: str) -> bool:
@@ -98,7 +139,7 @@ async def answer_question(
     """
     
     # Get conversation history
-    history = get_conversation_history(student_id, assignment_id)
+    history = await get_conversation_history(student_id, assignment_id)
     is_first_message = len(history) == 0
     
     # Handle greetings (first message or standalone greeting)
@@ -113,8 +154,8 @@ I'm here to help you with your assignment. I can:
 
 Which question would you like to start with? Just tell me the question number or describe what you need help with!"""
         
-        save_conversation(student_id, assignment_id, "user", question)
-        save_conversation(student_id, assignment_id, "assistant", greeting_response)
+        await save_conversation(student_id, assignment_id, "user", question)
+        await save_conversation(student_id, assignment_id, "assistant", greeting_response)
         return greeting_response
     
     # Build system prompt based on conversation stage
@@ -185,9 +226,9 @@ IMPORTANT:
     
     answer = response.choices[0].message.content
     
-    # Save to history
-    save_conversation(student_id, assignment_id, "user", question)
-    save_conversation(student_id, assignment_id, "assistant", answer)
+    # Save to database
+    await save_conversation(student_id, assignment_id, "user", question)
+    await save_conversation(student_id, assignment_id, "assistant", answer)
     
     return answer
 
@@ -195,58 +236,34 @@ IMPORTANT:
 async def should_suggest_videos(question: str, answer: str, history: List[Dict]) -> bool:
     """
     Decide if we should suggest YouTube videos
-    Only suggest after full solution is given
+    Now suggests videos for any detailed response to help reinforce learning
     """
-    # Don't suggest for greetings or initial questions
+    # Don't suggest for greetings
     if is_greeting(question):
         return False
     
-    # Check if this was a request for full solution
-    if is_requesting_full_solution(question):
-        return True
-    
-    # More comprehensive solution detection
+    # Always suggest unless it's a very short response
     answer_lower = answer.lower()
     
-    # Check for mathematical calculations (LaTeX or plain)
-    has_calculations = bool(
-        re.search(r'\\[\[\(].*?=.*?\\[\]\)]', answer) or  # LaTeX math with =
-        re.search(r'=\s*\d+', answer) or  # Simple equations like "= 60"
-        re.search(r'\d+\s*(?:cm|m|km|kg|g|cm²|m²)', answer)  # Units
-    )
+    # Check if answer is substantial enough (at least 200 characters)
+    is_substantial = len(answer) > 200
     
-    # Check for step-by-step solutions
-    solution_indicators = [
-        'step 1', 'step 2', 'step 3',
-        'therefore', 'the answer is',
-        'final answer', 'solution:',
-        "here's the complete solution",
-        'so, the', 'thus,', 'hence,',
-        'let\'s plug', 'substitute',
-        'we get', 'result is'
-    ]
+    # Check if it looks like actual content (not just greeting or placeholder)
+    has_content = any(indicator in answer_lower for indicator in [
+        'step', 'example', 'formula', 'equation', 'answer', 'solution',
+        'therefore', 'however', 'also', 'this', 'that', 'the',
+        'is', 'are', 'explain', 'understand', 'learn', 'help'
+    ])
     
-    has_solution_words = any(indicator in answer_lower for indicator in solution_indicators)
+    # Decision: suggest videos for substantial, content-rich responses
+    should_suggest = is_substantial and has_content
     
-    # Check if answer is detailed enough
-    is_detailed = len(answer) > 400  # Lowered threshold
+    print(f"\n📺 Video Suggestion Analysis:")
+    print(f"   - Is substantial (>200 chars): {is_substantial} (length: {len(answer)})")
+    print(f"   - Has content: {has_content}")
+    print(f"   - 💡 Suggest videos: {should_suggest}")
     
-    # Check if it contains actual numeric answer
-    has_numeric_answer = bool(re.search(r'(?:answer|area|result).*?(?:is|=)\s*\d+', answer_lower))
-    
-    # Decision logic
-    is_full_solution = (
-        has_calculations and is_detailed and (has_solution_words or has_numeric_answer)
-    )
-    
-    print(f"\n🔍 Video Detection Analysis:")
-    print(f"   - Has calculations: {has_calculations}")
-    print(f"   - Has solution words: {has_solution_words}")
-    print(f"   - Is detailed (>400 chars): {is_detailed} (length: {len(answer)})")
-    print(f"   - Has numeric answer: {has_numeric_answer}")
-    print(f"   - 📺 Suggest videos: {is_full_solution}")
-    
-    return is_full_solution
+    return should_suggest
 
 
 async def search_youtube_videos(query: str, max_results: int = 3) -> List[Dict]:
@@ -316,3 +333,196 @@ Examples:
     
     query = response.choices[0].message.content.strip().strip('"').strip("'")
     return query
+
+
+def get_greeting_response(assignment_title: str) -> str:
+    """
+    Get greeting response for initial student interaction
+    """
+    greeting_response = f"""👋 Hello! Welcome to the AI Assignment Helper!
+
+I'm here to help you with: **{assignment_title}**
+
+You have two options:
+
+**Option 1: Ask AI a Question** 🤖
+- Ask me anything about the assignment
+- I'll give you hints and guidance first
+- Ask again for more detailed explanations
+- Request the full solution when you're stuck
+
+**Option 2: Continue the Conversation** 💬
+- After I respond to your question, you can ask follow-up questions
+- I'll explain it differently if you don't understand
+- We can go back and forth naturally
+
+What would you like to do? Just ask me any question about the assignment!"""
+    
+    return greeting_response
+
+
+async def handle_ai_response(
+    question: str,
+    assignment_context: str,
+    assignment_title: str,
+    student_id: str,
+    assignment_id: str
+) -> str:
+    """
+    Handle AI response mode: AI responds to student's question
+    """
+    
+    # Get conversation history
+    history = await get_conversation_history(student_id, assignment_id)
+    is_first_message = len(history) == 0
+    
+    # Handle greetings
+    if is_greeting(question) and len(question.split()) <= 3:
+        response = get_greeting_response(assignment_title)
+        await save_conversation(student_id, assignment_id, "user", question, "greeting")
+        await save_conversation(student_id, assignment_id, "assistant", response, "greeting")
+        return response
+    
+    # Build system prompt for AI response
+    system_content = f"""You are a friendly and helpful teacher assistant for students.
+
+Assignment Title: {assignment_title}
+
+Assignment Content:
+{assignment_context}
+
+CONVERSATION STYLE:
+- Be natural and conversational like ChatGPT
+- Don't be overly formal or robotic
+- Use simple, clear language
+- Be encouraging and supportive
+- NEVER use LaTeX formatting (\\[ \\], \\( \\), etc.)
+- Write all math equations in plain text (e.g., "Area = 1/2 × base × height" or "Area = (1/2) * base * height")
+- Use regular text with symbols: ×, ÷, =, ², ³
+- Format should be readable in plain text messages
+
+TEACHING RULES:
+1. **For greetings/general questions**: Greet warmly and ask which question they need help with
+
+2. **For specific questions**: 
+   - First time: Give HINTS and GUIDANCE only (not full solution)
+   - Ask guiding questions
+   - Provide similar examples
+   - Encourage them to try
+   
+3. **If student asks for more help**:
+   - Give more detailed hints
+   - Break down steps
+   - Show partial solutions
+   
+4. **ONLY give full solution when explicitly requested**:
+   - "Give me the full solution"
+   - "Solve it for me"
+   - "I give up"
+   - "Just show me the answer"
+
+5. **Adapt your style**:
+   - If they ask "explain differently" → use different approach
+   - If confused → simplify your language
+   - If stuck → give more hints
+
+IMPORTANT: 
+- Start with hints, NOT solutions
+- Only escalate when student explicitly asks
+- Remember previous conversation context
+- Be patient and encouraging"""
+
+    # Build messages
+    messages = [{"role": "system", "content": system_content}]
+    
+    # Add conversation history
+    messages.extend(history)
+    
+    # Add current question
+    messages.append({"role": "user", "content": question})
+    
+    # Get response from GPT
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages,
+        temperature=0.7,
+        max_tokens=1500
+    )
+    
+    answer = response.choices[0].message.content
+    
+    # Save to database
+    await save_conversation(student_id, assignment_id, "user", question, "ai_response")
+    await save_conversation(student_id, assignment_id, "assistant", answer, "ai_response")
+    
+    return answer
+
+
+async def handle_user_continuation(
+    user_input: str,
+    previous_ai_response: str,
+    assignment_context: str,
+    assignment_title: str,
+    student_id: str,
+    assignment_id: str
+) -> str:
+    """
+    Handle user continuation: Allow user to follow up on AI response
+    """
+    
+    # Get conversation history
+    history = await get_conversation_history(student_id, assignment_id)
+    
+    # Build system prompt for continuation
+    system_content = f"""You are a friendly and helpful teacher assistant for students.
+
+Assignment Title: {assignment_title}
+
+Assignment Content:
+{assignment_context}
+
+PREVIOUS AI RESPONSE:
+{previous_ai_response}
+
+CONVERSATION STYLE:
+- Be natural and conversational like ChatGPT
+- Build upon the previous response
+- Don't repeat what you already said
+- Be more detailed if they ask for clarification
+- Use simple, clear language
+- NEVER use LaTeX formatting (\\[ \\], \\( \\), etc.)
+- Write all math equations in plain text
+
+TEACHING RULES FOR CONTINUATION:
+1. **If asking for clarification**: Explain more simply, use different examples
+2. **If asking about another part**: Smoothly transition to that topic
+3. **If still confused**: Break down into smaller steps
+4. **If asking for full solution**: Provide complete step-by-step solution
+5. **If asking to continue**: Go deeper into the explanation
+
+Remember the previous response and build upon it naturally. Don't restart the explanation."""
+
+    # Build messages
+    messages = [{"role": "system", "content": system_content}]
+    
+    # Add conversation history
+    messages.extend(history)
+    
+    # Add user continuation input
+    messages.append({"role": "user", "content": user_input})
+    
+    # Get response from GPT
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages,
+        temperature=0.7,
+        max_tokens=1500
+    )
+    
+    answer = response.choices[0].message.content
+    
+    # Save to database
+    await save_conversation(student_id, assignment_id, "user", user_input, "user_question")
+    await save_conversation(student_id, assignment_id, "assistant", answer, "user_question")
+    
+    return answer

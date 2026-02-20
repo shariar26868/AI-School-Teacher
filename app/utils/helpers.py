@@ -237,3 +237,152 @@ def detect_question_type(question: str) -> str:
         return "comparison"
     else:
         return "general"
+
+
+def validate_interaction_type(interaction_type: str) -> bool:
+    """
+    Validate if interaction_type is valid for chatbot
+    """
+    valid_types = ['greeting', 'ai_response', 'user_question']
+    return interaction_type in valid_types
+
+
+def format_chatbot_response(response: str) -> str:
+    """
+    Format AI response for better readability
+    - Ensure proper spacing
+    - Maintain bullet points and numbered lists
+    - Remove excessive blank lines
+    """
+    import re
+    
+    # Remove multiple blank lines
+    response = re.sub(r'\n\n+', '\n\n', response)
+    
+    # Ensure proper spacing around bullet points
+    response = re.sub(r'\n\s*[-•*]\s*', '\n• ', response)
+    
+    # Ensure proper spacing around numbered lists
+    response = re.sub(r'\n\s*(\d+)\.\s*', r'\n\1. ', response)
+    
+    return response.strip()
+
+
+def extract_ai_topic_from_response(response: str) -> Optional[str]:
+    """
+    Extract main topic/subject from AI response
+    Useful for follow-up questions
+    """
+    # Get first sentence or first line as topic
+    lines = response.split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if line and len(line) > 10:
+            # Remove markdown formatting
+            import re
+            clean_line = re.sub(r'[*_#]', '', line)
+            return clean_line[:80]  # Return first 80 chars
+    
+    return None
+
+
+def check_if_asking_for_solution(question: str) -> bool:
+    """
+    Check if student is explicitly asking for full solution
+    """
+    solution_keywords = [
+        'full solution', 'complete solution', 'full answer',
+        'solve it', 'solve this', 'show me the answer',
+        'just tell me', 'i give up', 'give up',
+        'show me how', 'step by step solution'
+    ]
+    
+    question_lower = question.lower()
+    return any(keyword in question_lower for keyword in solution_keywords)
+
+
+def check_if_asking_for_clarification(question: str) -> bool:
+    """
+    Check if student is asking for clarification/explanation
+    """
+    clarification_keywords = [
+        'explain', 'clarify', 'clear', 'confused',
+        'understand', 'different way', 'simpler',
+        'again', 'more detail', 'example',
+        'what do you mean', 'can you break it down'
+    ]
+    
+    question_lower = question.lower()
+    return any(keyword in question_lower for keyword in clarification_keywords)
+
+
+def check_if_follow_up_question(question: str) -> bool:
+    """
+    Check if this is a follow-up to previous response
+    """
+    followup_patterns = [
+        'and ', 'but ', 'what about', 'how about',
+        'also ', 'then ', 'next ', 'another',
+        'after that', 'then what', 'what else'
+    ]
+    
+    question_lower = question.lower()
+    return any(pattern in question_lower for pattern in followup_patterns)
+
+
+def format_conversation_history(messages: list, max_display: int = 10) -> str:
+    """
+    Format conversation history for logging/debugging
+    """
+    conversation_text = ""
+    
+    # Show last max_display messages
+    recent_messages = messages[-max_display:] if len(messages) > max_display else messages
+    
+    for i, msg in enumerate(recent_messages, 1):
+        role = msg.get('role', 'unknown')
+        content = msg.get('content', '')
+        
+        # Truncate long messages for readability
+        if len(content) > 150:
+            content = content[:150] + "..."
+        
+        conversation_text += f"\n{i}. {role.upper()}: {content}"
+    
+    return conversation_text
+
+
+def estimate_response_level(conversation_history: list) -> str:
+    """
+    Estimate what level of explanation student needs based on conversation history
+    Returns: 'beginner', 'intermediate', or 'advanced'
+    """
+    if not conversation_history:
+        return 'beginner'
+    
+    # Count question types in history
+    clarification_count = 0
+    solution_requests = 0
+    
+    for msg in conversation_history:
+        if msg.get('role') == 'user':
+            content = msg.get('content', '')
+            if check_if_asking_for_clarification(content):
+                clarification_count += 1
+            if check_if_asking_for_solution(content):
+                solution_requests += 1
+    
+    # If many clarifications needed, student is beginner
+    if clarification_count > 2:
+        return 'beginner'
+    
+    # If requesting solutions, probably stuck
+    if solution_requests > 0:
+        return 'intermediate'
+    
+    # If asking follow-ups, probably advanced
+    if len(conversation_history) > 4:
+        return 'advanced'
+    
+    return 'beginner'
