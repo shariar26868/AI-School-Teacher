@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     # Google Gemini (for mindmap and other AI tasks)
     GEMINI_API_KEY: Optional[str] = None
     
+    # FAL AI (for image generation)
+    FAL_KEY: Optional[str] = None
+
     # AWS
     AWS_ACCESS_KEY_ID: str
     AWS_SECRET_ACCESS_KEY: str
@@ -28,10 +31,14 @@ class Settings(BaseSettings):
     
     class Config:
         env_file = ".env"
-        extra = 'ignore'  # ✅ ADD THIS LINE - Ignores extra fields in .env
+        extra = 'ignore'
 
 @lru_cache()
 def get_settings():
     return Settings()
 
 settings = get_settings()
+
+
+
+# fal-ai/ideogram - fal api model 
